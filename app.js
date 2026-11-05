@@ -18,14 +18,31 @@
     current: null
   };
 
-  let state = structuredClone(DEFAULT_STATE);
+  let state = null;
   let db = null;
   let toastTimer = 0;
   let dirtyRates = false;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-  const clone = value => JSON.parse(JSON.stringify(value));
+  function clone(value) {
+    if (typeof structuredClone === 'function') {
+      try { return structuredClone(value); } catch (_) { /* JSON互換データへフォールバック */ }
+    }
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  state = clone(DEFAULT_STATE);
+
+  function eventClosest(event, selector) {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    for (const node of path) {
+      if (node && node.nodeType === 1 && typeof node.matches === 'function' && node.matches(selector)) return node;
+    }
+    let target = event.target;
+    if (target && target.nodeType !== 1) target = target.parentElement;
+    return target && typeof target.closest === 'function' ? target.closest(selector) : null;
+  }
 
   function openDatabase() {
     return new Promise((resolve, reject) => {
@@ -334,6 +351,7 @@
   function addPunchButton(parent, label, className, action) {
     const button = document.createElement('button');
     button.type = 'button'; button.className = className; button.textContent = label; button.dataset.action = action;
+    button.addEventListener('click', () => { void clockAction(action); });
     parent.append(button);
   }
 
@@ -542,8 +560,34 @@
       if (!result.changed) { if (result.message) showToast(result.message); return; }
       state.current = result.current;
       state.records = result.records;
-      await saveState(); renderHome(); showToast(result.message);
+      renderHome(); showToast(result.message);
+      await saveState();
     } catch (error) { showToast(error.message); }
+  }
+
+  async function saveRates() {
+    const inputs = getRateInputs();
+    const invalid = inputs.find(r => !r.name || !validTime(r.start) || !validTime(r.end) || !Number.isFinite(r.wage) || r.wage < 0);
+    if (!inputs.length) return showToast('時給区分を1つ以上登録してください');
+    if (invalid) return showToast('区分名、時刻、時給を確認してください');
+    state.rates = inputs;
+    dirtyRates = false;
+    renderRates(); renderRateWarning(); renderHome();
+    showToast('時給設定を保存しました');
+    await saveState();
+  }
+
+  function addRate() {
+    const id = makeId();
+    const rates = getRateInputs();
+    rates.push({ id, name: `時給区分${rates.length + 1}`, start: '09:00', end: '17:00', wage: 1100 });
+    renderRates(rates); dirtyRates = true; renderRateWarning();
+  }
+
+  async function setTheme(theme) {
+    state.theme = theme === 'light' ? 'light' : 'dark';
+    applyTheme(); renderSettings();
+    await saveState();
   }
 
   function createCsv(records) {
@@ -564,23 +608,17 @@
 
   function bindEvents() {
     document.addEventListener('click', async event => {
-      const nav = event.target.closest('[data-nav]');
+      const nav = eventClosest(event, '[data-nav]');
       if (nav) return navigate(nav.dataset.nav);
-      const theme = event.target.closest('[data-theme]');
-      if (theme) {
-        state.theme = theme.dataset.theme; applyTheme(); await saveState(); renderSettings(); return;
-      }
-      const punch = event.target.closest('[data-action]');
-      if (punch) return clockAction(punch.dataset.action);
-      const removeRate = event.target.closest('[data-remove-rate]');
+      const removeRate = eventClosest(event, '[data-remove-rate]');
       if (removeRate) {
         const rates = getRateInputs();
         if (rates.length <= 1) return showToast('時給区分は1つ以上必要です');
         renderRates(rates.filter(r => r.id !== removeRate.dataset.removeRate)); dirtyRates = true; renderRateWarning(); return;
       }
-      const edit = event.target.closest('[data-edit]');
+      const edit = eventClosest(event, '[data-edit]');
       if (edit) return openEntryDialog(state.records.find(r => r.id === edit.dataset.edit));
-      const del = event.target.closest('[data-delete]');
+      const del = eventClosest(event, '[data-delete]');
       if (del) {
         const record = state.records.find(r => r.id === del.dataset.delete);
         if (record && window.confirm(`${dateLabel(record.start, true)}の勤務記録を削除しますか？`)) {
@@ -588,27 +626,14 @@
         }
         return;
       }
-      if (event.target.closest('#add-entry')) return openEntryDialog();
-      if (event.target.closest('.close-dialog')) { $('#entry-dialog').close(); return; }
-      if (event.target.closest('#add-rate')) {
-        const id = makeId();
-        const rates = getRateInputs();
-        rates.push({ id, name: `時給区分${rates.length + 1}`, start: '09:00', end: '17:00', wage: 1100 });
-        renderRates(rates); dirtyRates = true; renderRateWarning(); return;
-      }
-      if (event.target.closest('#save-rates')) {
-        const inputs = getRateInputs();
-        const invalid = inputs.find(r => !r.name || !validTime(r.start) || !validTime(r.end) || !Number.isFinite(r.wage) || r.wage < 0);
-        if (!inputs.length) return showToast('時給区分を1つ以上登録してください');
-        if (invalid) return showToast('区分名、時刻、時給を確認してください');
-        state.rates = inputs; dirtyRates = false; await saveState(); renderRates(); renderRateWarning(); renderHome(); showToast('時給設定を保存しました'); return;
-      }
-      if (event.target.closest('#copy-report')) {
+      if (eventClosest(event, '#add-entry')) return openEntryDialog();
+      if (eventClosest(event, '.close-dialog')) { $('#entry-dialog').close(); return; }
+      if (eventClosest(event, '#copy-report')) {
         try { await navigator.clipboard.writeText($('#report-text').value); showToast('報告文をコピーしました'); }
         catch (_) { $('#report-text').focus(); $('#report-text').select(); document.execCommand('copy'); showToast('報告文をコピーしました'); }
         return;
       }
-      if (event.target.closest('#share-report')) {
+      if (eventClosest(event, '#share-report')) {
         const text = $('#report-text').value;
         if (navigator.share) {
           try { await navigator.share({ text, title: '勤務報告' }); } catch (error) { if (error.name !== 'AbortError') showToast('共有を開始できませんでした'); }
@@ -618,25 +643,30 @@
         }
         return;
       }
-      if (event.target.closest('#export-csv')) {
+      if (eventClosest(event, '#export-csv')) {
         const month = $('#month-select').value;
         const records = state.records.filter(r => monthKey(r.start) === month);
         download(`MY_TIME_CARD_${month || 'all'}.csv`, createCsv(records), 'text/csv;charset=utf-8');
         showToast('CSVを書き出しました'); return;
       }
-      if (event.target.closest('#backup-data')) {
+      if (eventClosest(event, '#backup-data')) {
         download(`MY_TIME_CARD_backup_${dateKey(Date.now())}.json`, JSON.stringify({ app: 'MY TIME CARD', version: 1, exportedAt: new Date().toISOString(), state }, null, 2), 'application/json');
         showToast('バックアップを保存しました'); return;
       }
-      if (event.target.closest('#restore-data')) { $('#restore-file').click(); return; }
-    });
+      if (eventClosest(event, '#restore-data')) { $('#restore-file').click(); return; }
+    }, true);
 
-    document.addEventListener('input', event => {
-      if (event.target.matches('.rate-item input')) { dirtyRates = true; renderRateWarning(); }
+    $('#add-rate').addEventListener('click', addRate);
+    $('#save-rates').addEventListener('click', () => { void saveRates(); });
+    $$('.theme-switch button').forEach(button => button.addEventListener('click', () => { void setTheme(button.dataset.theme); }));
+    $('#display-name').addEventListener('input', event => {
       if (event.target.matches('#display-name')) {
         state.name = event.target.value.slice(0, 40);
         saveState();
       }
+    });
+    $('#rates-list').addEventListener('input', event => {
+      if (eventClosest(event, '.rate-item input')) { dirtyRates = true; renderRateWarning(); }
     });
     $('#display-name').addEventListener('change', () => renderReport());
     $('#month-select').addEventListener('change', renderHistory);
@@ -677,7 +707,10 @@
       }
     }, 1000);
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-      navigator.serviceWorker.register('./sw.js').catch(error => console.warn('Service Workerの登録に失敗しました。', error));
+      const workerUrl = new URL('./sw.js?v=2.1.0', document.baseURI);
+      navigator.serviceWorker.register(workerUrl.href)
+        .then(registration => registration.update())
+        .catch(error => console.warn('Service Workerの登録に失敗しました。', error));
     }
   }
 
@@ -686,3 +719,4 @@
     document.body.insertAdjacentHTML('beforeend', '<p style="padding:24px;color:#f88">アプリを起動できませんでした。ページを再読み込みしてください。</p>');
   });
 })();
+
