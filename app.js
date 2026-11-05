@@ -22,6 +22,7 @@
   let db = null;
   let toastTimer = 0;
   let dirtyRates = false;
+  let displayedReportMonth = '';
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -132,6 +133,16 @@
   function validTime(value) { return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value); }
   function minutesAtTime(value) { const [h, m] = value.split(':').map(Number); return h * 60 + m; }
   function makeId() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; }
+  function roundToNearestQuarter(timestamp) {
+    const date = new Date(Number(timestamp));
+    const minute = date.getMinutes();
+    if (minute >= 52) date.setHours(date.getHours() + 1, 0, 0, 0);
+    else if (minute < 8) date.setMinutes(0, 0, 0);
+    else if (minute < 24) date.setMinutes(15, 0, 0);
+    else if (minute < 38) date.setMinutes(30, 0, 0);
+    else date.setMinutes(45, 0, 0);
+    return date.getTime();
+  }
   function localDateTime(date) {
     const d = new Date(date);
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -238,7 +249,7 @@
   }
 
   function transitionPunch(current, records, action, timestamp, ratesSnapshot) {
-    const now = Math.floor(Number(timestamp) / 60000) * 60000;
+    const now = roundToNearestQuarter(timestamp);
     if (action === 'clock-in') {
       if (current) return { current, records, changed: false, message: 'すでに勤務中です' };
       return { current: { start: now, breaks: [], breakStart: null }, records, changed: true, message: '出勤時刻を記録しました' };
@@ -326,8 +337,9 @@
       $('#timer-label').textContent = breaking ? '休憩中 · 勤務時間には含まれません' : `出勤 ${timeLabel(current.start)}`;
       $('#elapsed-time').classList.remove('hidden');
       const liveBreaks = [...(current.breaks || [])];
-      if (current.breakStart) liveBreaks.push({ start: current.breakStart, end: Date.now() });
-      $('#elapsed-time').textContent = formatDurationClock(current.start, Date.now(), liveBreaks);
+      const roundedNow = roundToNearestQuarter(Date.now());
+      if (current.breakStart) liveBreaks.push({ start: current.breakStart, end: roundedNow });
+      $('#elapsed-time').textContent = formatDurationClock(current.start, roundedNow, liveBreaks);
       if (breaking) addPunchButton(actions, '休憩を終了', 'primary punch-button', 'break-end');
       else {
         addPunchButton(actions, '休憩を開始', 'secondary punch-secondary', 'break-start');
@@ -420,8 +432,12 @@
   }
 
   function renderReport() {
-    const records = [...state.records].sort((a, b) => a.start - b.start);
-    $('#report-text').value = buildReportText(state.name, records);
+    const currentMonth = monthKey(Date.now());
+    displayedReportMonth = currentMonth;
+    const records = state.records
+      .filter(record => monthKey(record.start) === currentMonth)
+      .sort((a, b) => a.start - b.start);
+    $('#report-text').value = buildReportText(state.name, records, currentMonth);
     const groups = aggregate(records);
     $('#report-total').replaceChildren();
     const label = document.createElement('span'); label.textContent = `${records.length}回の勤務 · ${groups.length}区分`;
@@ -430,25 +446,67 @@
     $('#share-hint').textContent = navigator.share ? '共有メニューからLINEを選べます。' : 'コピーした文章をLINEに貼り付けてください。';
   }
 
-  function buildReportText(name, records) {
-    const lines = [String(name || '').trim() || 'ゆうた'];
-    let hasLine = false;
-    for (const record of records) {
-      const segments = record.segments || [];
-      if (!segments.length) {
-        lines.push(`${dateLabel(record.start)} ${timeLabel(record.start)}～${timeLabel(record.end)} ${formatHours(record.totalMinutes)}`);
-        hasLine = true;
-      } else {
-        segments.forEach((segment, index) => {
-          const date = index === 0 ? `${dateLabel(record.start)} ` : '';
-          lines.push(`${date}${timeLabel(segment.start)}～${timeLabel(segment.end)} ${formatHours(segment.minutes)}`);
-          hasLine = true;
-        });
+  function reportIntervals(record) {
+    const start = Number(record.start), end = Number(record.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return [];
+
+    const breaks = (record.breaks || [])
+      .map(item => ({ start: Math.max(start, Number(item.start)), end: Math.min(end, Number(item.end)) }))
+      .filter(item => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start)
+      .sort((a, b) => a.start - b.start);
+    const mergedBreaks = [];
+    for (const item of breaks) {
+      const previous = mergedBreaks[mergedBreaks.length - 1];
+      if (previous && item.start <= previous.end) previous.end = Math.max(previous.end, item.end);
+      else mergedBreaks.push({ ...item });
+    }
+
+    const workedRanges = [];
+    let cursor = start;
+    for (const item of mergedBreaks) {
+      if (item.start > cursor) workedRanges.push({ start: cursor, end: item.start });
+      cursor = Math.max(cursor, item.end);
+    }
+    if (cursor < end) workedRanges.push({ start: cursor, end });
+
+    const intervals = [];
+    for (const range of workedRanges) {
+      cursor = range.start;
+      while (cursor < range.end) {
+        const date = new Date(cursor);
+        const minuteOfDay = date.getHours() * 60 + date.getMinutes();
+        const boundary = new Date(cursor);
+        if (minuteOfDay < 22 * 60) boundary.setHours(22, 0, 0, 0);
+        else boundary.setHours(24, 0, 0, 0);
+        const next = Math.min(range.end, boundary.getTime());
+        if (next <= cursor) break;
+        intervals.push({ start: cursor, end: next, minutes: Math.round((next - cursor) / 60000), dayKey: dateKey(cursor) });
+        cursor = next;
       }
     }
-    const groups = aggregate(records);
-    if (groups.length) lines.push('', groups.map(g => `${g.name}${formatHours(g.minutes)}`).join(' '));
-    else if (hasLine) lines.push('', '合計0h');
+    return intervals;
+  }
+
+  function buildReportText(name, records, targetMonth = monthKey(Date.now())) {
+    const lines = [String(name || '').trim() || 'ゆうた'];
+    const intervals = records
+      .filter(record => monthKey(record.start) === targetMonth)
+      .sort((a, b) => a.start - b.start)
+      .flatMap(reportIntervals)
+      .sort((a, b) => a.start - b.start);
+    let previousDay = '';
+    let beforeMinutes = 0, afterMinutes = 0;
+    for (const interval of intervals) {
+      const after = new Date(interval.start).getHours() >= 22;
+      if (after) afterMinutes += interval.minutes;
+      else beforeMinutes += interval.minutes;
+      const dateColumn = interval.dayKey === previousDay
+        ? ' '.repeat(6)
+        : `${dateLabel(interval.start).padEnd(5, ' ')} `;
+      lines.push(`${dateColumn}${timeLabel(interval.start)}～${timeLabel(interval.end)} ${formatHours(interval.minutes)}`);
+      previousDay = interval.dayKey;
+    }
+    lines.push(`前${formatHours(beforeMinutes)} 後${formatHours(afterMinutes)}`);
     return lines.join('\n');
   }
 
@@ -553,7 +611,7 @@
   }
 
   async function clockAction(action) {
-    const now = Math.floor(Date.now() / 60000) * 60000;
+    const now = Date.now();
     try {
       const result = transitionPunch(state.current, state.records, action, now, clone(state.rates));
       if (result.error) return showToast(result.error);
@@ -597,7 +655,7 @@
       const breakdown = aggregate([record]).map(g => `${g.name}:${formatHours(g.minutes)}:${Math.round(g.amount)}円`).join(' / ');
       rows.push([localDateTime(record.start), localDateTime(record.end), breaks, record.totalMinutes, formatHours(record.totalMinutes), record.amount, breakdown]);
     }
-    return '\ufeff' + rows.map(row => row.map(value => `"${String(value ?? '').replaceAll('"', '""')}"`).join(',')).join('\r\n');
+    return '\ufeff' + rows.map(row => row.map(value => `"${String(value ?? '').replaceAll('"', '""')}"`).join(',')).join('\n');
   }
 
   function download(filename, content, type) {
@@ -702,12 +760,14 @@
       $('#today-date').textContent = `${dateLabel(now, true)}（${'日月火水木金土'[now.getDay()]}）`;
       if (state.current) {
         const liveBreaks = [...(state.current.breaks || [])];
-        if (state.current.breakStart) liveBreaks.push({ start: state.current.breakStart, end: Date.now() });
-        $('#elapsed-time').textContent = formatDurationClock(state.current.start, Date.now(), liveBreaks);
+        const roundedNow = roundToNearestQuarter(Date.now());
+        if (state.current.breakStart) liveBreaks.push({ start: state.current.breakStart, end: roundedNow });
+        $('#elapsed-time').textContent = formatDurationClock(state.current.start, roundedNow, liveBreaks);
       }
+      if (monthKey(now) !== displayedReportMonth) renderReport();
     }, 1000);
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-      const workerUrl = new URL('./sw.js?v=2.1.0', document.baseURI);
+      const workerUrl = new URL('./sw.js?v=2.2.0', document.baseURI);
       navigator.serviceWorker.register(workerUrl.href)
         .then(registration => registration.update())
         .catch(error => console.warn('Service Workerの登録に失敗しました。', error));
@@ -719,4 +779,3 @@
     document.body.insertAdjacentHTML('beforeend', '<p style="padding:24px;color:#f88">アプリを起動できませんでした。ページを再読み込みしてください。</p>');
   });
 })();
-
