@@ -1,5 +1,5 @@
-const CACHE_NAME = 'my-time-card-v3';
-const APP_VERSION = '2.2.0';
+const CACHE_NAME = 'my-time-card-v4';
+const APP_VERSION = '2.3.0';
 const APP_SHELL = ['./', './index.html', './styles.css', `./app.js?v=${APP_VERSION}`, './manifest.webmanifest', './icon.svg', './icon-180.png']
   .map(path => new URL(path, self.registration.scope).href);
 
