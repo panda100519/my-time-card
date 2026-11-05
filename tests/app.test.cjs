@@ -26,7 +26,8 @@ class FakeElement {
         const enabled = force === undefined ? !this.className.split(/\s+/).includes(name) : Boolean(force);
         this.setClass(name, enabled);
         return enabled;
-      }
+      },
+      contains: name => this.className.split(/\s+/).includes(name)
     };
   }
   setClass(name, enabled) {
@@ -84,11 +85,12 @@ class FakeDocument {
     this.listeners = new Map();
     this.elements = new Map();
     this.documentElement = new FakeElement('html');
+    this.hidden = false;
     this.themeButtons = ['dark', 'light'].map(theme => {
       const button = new FakeElement('button'); button.dataset.theme = theme; return button;
     });
     for (const id of [
-      'today-date','current-time','work-status','timer-label','elapsed-time','punch-actions','rate-warning-home',
+      'today-date','current-time','work-status','timer-label','elapsed-time','elapsed-details','punch-actions','rate-warning-home',
       'month-days','month-hours','month-pay','all-hours','home-breakdown','display-name','month-select','entry-form',
       'restore-file','entry-dialog','rates-list','rate-warning','add-rate','save-rates','toast'
     ]) {
@@ -123,6 +125,10 @@ class FakeDocument {
     for (const node of path) for (const handler of node.listeners.get(type) || []) await handler(event);
     for (const entry of this.listeners.get(type) || []) if (!entry.capture) await entry.handler(event);
   }
+  async dispatchDocument(type) {
+    const event = { type, target: this, composedPath: () => [this], preventDefault() {} };
+    for (const entry of this.listeners.get(type) || []) await entry.handler(event);
+  }
   click(element) { return this.dispatch('click', element); }
   input(element) { return this.dispatch('input', element); }
 }
@@ -132,14 +138,26 @@ function makeApp({ indexedDBEnabled = false, withDOM = false, values = new Map()
   let source = fs.readFileSync(appPath, 'utf8');
   source = source.replace(/\n  init\(\)\.catch\(error => \{[\s\S]*?\n  \}\);\n\}\)\(\);\s*$/, `
   window.__test = {
-    calculateRecord, aggregate, validateSchedule, buildReportText, formatDurationClock, transitionPunch, roundToNearestQuarter,
+    calculateRecord, aggregate, validateSchedule, buildReportText, formatDurationClock, formatElapsedMilliseconds,
+    transitionPunch, roundToNearestQuarter, timerSnapshot, timeLabel, refreshClock, startClock, clockAction,
     bindEvents, renderHome, renderSettings,
     normalizeState, setState: value => { state = normalizeState(value); },
-    getState: () => state, saveState, loadState, createCsv, formatHours
+    getState: () => state, saveState, loadState, createCsv, formatHours,
+    setNow: value => __setNow(value), getIntervals: () => window.__intervals
   };
 })();`);
   assert.match(source, /window\.__test/, 'app bootstrap test hook was not installed');
   const document = withDOM ? new FakeDocument() : undefined;
+  const nativeDate = Date;
+  let virtualNow = nativeDate.now();
+  class VirtualDate extends nativeDate {
+    constructor(...args) {
+      if (args.length) super(...args);
+      else super(virtualNow);
+    }
+    static now() { return virtualNow; }
+  }
+  const intervals = [];
   const dbValues = new Map();
   const stores = new Set();
   const fakeDB = {
@@ -170,7 +188,12 @@ function makeApp({ indexedDBEnabled = false, withDOM = false, values = new Map()
     }
   } : undefined;
   const context = {
-    window: { ...(indexedDB ? { indexedDB } : {}), confirm: () => true, scrollTo() {}, setInterval() {} },
+    window: {
+      ...(indexedDB ? { indexedDB } : {}), confirm: () => true, scrollTo() {},
+      setInterval: (callback, delay) => { intervals.push({ callback, delay }); return intervals.length; },
+      __intervals: intervals
+    },
+    __setNow: value => { virtualNow = Number(value); },
     indexedDB,
     document,
     navigator: {},
@@ -181,7 +204,7 @@ function makeApp({ indexedDBEnabled = false, withDOM = false, values = new Map()
     console: { warn() {}, error: console.error },
     setTimeout,
     clearTimeout,
-    Date,
+    Date: VirtualDate,
     Math,
     JSON
   };
@@ -279,6 +302,127 @@ test('clock-in, break start/end and clock-out all save rounded times and calcula
     'ゆうた\n11/5  17:00～18:15 1.25h\n      18:30～20:15 1.75h\n前3h 後0h');
 });
 
+test('clock-outs after 5 or 14 minutes cancel without a new history row and reset the home state', async () => {
+  for (const minutes of [5, 14]) {
+    const { api, document, values } = makeApp({ withDOM: true });
+    const rates = api.getState().rates;
+    const existing = api.calculateRecord(stamp('15:00'), stamp('15:30'), [], rates);
+    api.setState({ ...api.getState(), records: [existing] });
+    const startAt = stamp('17:00');
+    api.setNow(startAt);
+    api.bindEvents(); api.renderHome();
+    const actions = document.querySelector('#punch-actions');
+    await document.click(actions.children[0]);
+
+    api.setNow(startAt + minutes * 60000);
+    api.renderHome();
+    await document.click(actions.children[1]);
+
+    assert.equal(api.getState().current, null, `${minutes} minutes should clear the shift`);
+    assert.equal(api.getState().records.length, 1, `${minutes} minutes should not add a shift`);
+    assert.equal(api.getState().records[0].id, existing.id, 'existing history must remain untouched');
+    assert.equal(document.querySelector('#work-status').textContent, '未出勤');
+    assert.equal(document.querySelector('#elapsed-time').classList.contains('hidden'), true);
+    assert.equal(document.querySelector('#elapsed-details').classList.contains('hidden'), true);
+    assert.equal(actions.children[0].dataset.action, 'clock-in', 'clock-in should be available again');
+    const saved = JSON.parse(values.get('my-time-card'));
+    assert.equal(saved.records.length, 1);
+    assert.equal(saved.current, null);
+  }
+});
+
+test('clock-out at 15 minutes creates a normal rounded work record', () => {
+  const { api } = makeApp();
+  const rates = api.getState().rates;
+  const startAt = stamp('17:00');
+  const start = api.transitionPunch(null, [], 'clock-in', startAt, rates);
+  const clockOut = api.transitionPunch(start.current, [], 'clock-out', startAt + 15 * 60000, rates);
+  assert.equal(clockOut.cancelled, undefined);
+  assert.equal(clockOut.current, null);
+  assert.equal(clockOut.records.length, 1);
+  assert.equal(clockOut.records[0].totalMinutes, 15);
+  assert.equal(clockOut.records[0].amount, 300);
+});
+
+test('clock labels use an unpadded hour and a two-digit minute everywhere they are formatted', () => {
+  const { api, document } = makeApp({ withDOM: true });
+  const cases = [
+    ['2026-11-05', '09:00', '9:00'],
+    ['2026-11-05', '01:00', '1:00'],
+    ['2026-11-05', '08:05', '8:05'],
+    ['2026-11-05', '17:00', '17:00'],
+    ['2026-11-05', '00:00', '0:00']
+  ];
+  for (const [date, value, expected] of cases) assert.equal(api.timeLabel(datedStamp(date, value)), expected);
+  api.setNow(datedStamp('2026-11-05', '09:00'));
+  api.renderHome();
+  assert.equal(document.querySelector('#current-time').textContent, '9:00');
+});
+
+test('active shifts saved before the elapsed timer migrate from their existing start time', () => {
+  const { api } = makeApp();
+  const start = stamp('17:00');
+  const oldState = { ...api.getState(), current: { start, breaks: [], breakStart: stamp('18:00') } };
+  const normalized = api.normalizeState(oldState);
+  assert.equal(normalized.current.startedAt, start);
+  assert.equal(normalized.current.breakStartedAt, stamp('18:00'));
+});
+
+test('elapsed timer refreshes each second, resumes from timestamps, and separates work and break time', async () => {
+  const { api, document, values } = makeApp({ withDOM: true });
+  const rates = api.getState().rates;
+  const startAt = stamp('17:00');
+  const started = api.transitionPunch(null, [], 'clock-in', startAt, rates);
+  api.setState({ ...api.getState(), current: started.current });
+  api.setNow(startAt);
+  api.bindEvents(); api.renderHome(); api.startClock();
+  const [interval] = api.getIntervals();
+  assert.equal(interval.delay, 1000);
+
+  api.setNow(startAt + 1000);
+  interval.callback();
+  assert.equal(document.querySelector('#elapsed-time').textContent, '00:00:01');
+  api.setNow(startAt + 2000);
+  interval.callback();
+  assert.equal(document.querySelector('#elapsed-time').textContent, '00:00:02');
+
+  const breakAt = startAt + 10 * 60000;
+  const onBreak = api.transitionPunch(started.current, [], 'break-start', breakAt, rates);
+  api.setState({ ...api.getState(), current: onBreak.current });
+  api.setNow(breakAt + 5 * 60000);
+  api.renderHome();
+  api.refreshClock();
+  assert.equal(document.querySelector('#work-status').textContent, '休憩中');
+  assert.equal(document.querySelector('#elapsed-time').textContent, '00:15:00');
+  assert.equal(document.querySelector('#elapsed-details').textContent, '実働 00:10:00 · 休憩 00:05:00');
+
+  document.hidden = true;
+  api.setNow(breakAt + 10 * 60000);
+  await document.dispatchDocument('visibilitychange');
+  assert.equal(document.querySelector('#elapsed-time').textContent, '00:15:00', 'hidden pages do not need timer increments');
+  document.hidden = false;
+  await document.dispatchDocument('visibilitychange');
+  assert.equal(document.querySelector('#elapsed-time').textContent, '00:20:00', 'returning to the app recalculates from the timestamps');
+  assert.equal(document.querySelector('#elapsed-details').textContent, '実働 00:10:00 · 休憩 00:10:00');
+
+  await api.saveState();
+  const reloaded = makeApp({ withDOM: true, values });
+  reloaded.api.setNow(breakAt + 20 * 60000);
+  const restored = await reloaded.api.loadState();
+  reloaded.api.setState(restored);
+  reloaded.api.renderHome();
+  assert.equal(reloaded.api.getState().current.startedAt, startAt);
+  assert.equal(reloaded.api.getState().current.breakStartedAt, breakAt);
+  assert.equal(reloaded.document.querySelector('#elapsed-time').textContent, '00:30:00');
+  assert.equal(reloaded.document.querySelector('#elapsed-details').textContent, '実働 00:10:00 · 休憩 00:20:00');
+  await reloaded.api.clockAction('clock-out', startAt + 30 * 60000);
+  reloaded.api.renderHome();
+  assert.equal(reloaded.api.getState().current, null);
+  assert.equal(reloaded.api.getState().records.length, 1);
+  assert.equal(reloaded.document.querySelector('#work-status').textContent, '未出勤');
+  assert.equal(reloaded.document.querySelector('#elapsed-time').classList.contains('hidden'), true);
+});
+
 test('rounded punch records remain correct across midnight', () => {
   const { api } = makeApp();
   const rates = api.getState().rates;
@@ -302,7 +446,13 @@ test('bound punch buttons process clock-in, break and clock-out clicks', async (
   await document.click(actions.children[0]);
   assert.equal(document.querySelector('#work-status').textContent, '休憩中');
   let current = api.getState().current;
-  api.setState({ ...api.getState(), current: { ...current, start: current.start - 120000, breakStart: current.start - 60000 } });
+  api.setState({ ...api.getState(), current: {
+    ...current,
+    start: current.start - 20 * 60000,
+    startedAt: current.startedAt - 20 * 60000,
+    breakStart: current.start - 10 * 60000,
+    breakStartedAt: current.startedAt - 10 * 60000
+  } });
   api.renderHome();
 
   await document.click(actions.children[0]);
@@ -405,7 +555,7 @@ test('LINE report deducts breaks and divides multiple days at the exact 22:00 bo
   const overnight = api.calculateRecord(datedStamp('2026-11-07', '23:00'), datedStamp('2026-11-08', '01:00'), [], rates);
   const report = api.buildReportText('ゆうた', [withBreak, nextDay, overnight], '2026-11');
   assert.equal(report,
-    'ゆうた\n11/5  17:00～19:00 2h\n      19:30～22:00 2.5h\n      22:00～23:00 1h\n11/6  22:00～23:00 1h\n11/7  23:00～00:00 1h\n11/8  00:00～01:00 1h\n前5.5h 後3h');
+    'ゆうた\n11/5  17:00～19:00 2h\n      19:30～22:00 2.5h\n      22:00～23:00 1h\n11/6  22:00～23:00 1h\n11/7  23:00～0:00 1h\n11/8  0:00～1:00 1h\n前5.5h 後3h');
 });
 
 test('LINE monthly totals reset and exclude other months', () => {

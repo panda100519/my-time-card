@@ -114,7 +114,15 @@
       amount: Number(r.amount) || 0
     })) : [];
     if (clean.current && clean.current.start) {
-      clean.current = { start: Number(clean.current.start), breaks: Array.isArray(clean.current.breaks) ? clean.current.breaks : [], breakStart: clean.current.breakStart ? Number(clean.current.breakStart) : null };
+      const start = Number(clean.current.start);
+      const breakStart = clean.current.breakStart ? Number(clean.current.breakStart) : null;
+      clean.current = {
+        start,
+        startedAt: Number.isFinite(Number(clean.current.startedAt)) ? Number(clean.current.startedAt) : start,
+        breaks: Array.isArray(clean.current.breaks) ? clean.current.breaks : [],
+        breakStart,
+        breakStartedAt: breakStart === null ? null : (Number.isFinite(Number(clean.current.breakStartedAt)) ? Number(clean.current.breakStartedAt) : breakStart)
+      };
     } else clean.current = null;
     return clean;
   }
@@ -154,7 +162,7 @@
     const d = new Date(value);
     return includeYear ? `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日` : `${d.getMonth() + 1}/${d.getDate()}`;
   }
-  function timeLabel(value) { const d = new Date(value); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+  function timeLabel(value) { const d = new Date(value); return `${d.getHours()}:${pad(d.getMinutes())}`; }
   function formatHours(minutes) {
     const hours = Number((minutes / 60).toFixed(2));
     return `${hours}h`;
@@ -162,9 +170,26 @@
   function formatDurationClock(start, end, breaks = []) {
     let elapsed = Math.max(0, end - start);
     for (const b of breaks || []) elapsed -= Math.max(0, Math.min(end, b.end) - Math.max(start, b.start));
-    const seconds = Math.max(0, Math.floor(elapsed / 1000));
+    return formatElapsedMilliseconds(elapsed);
+  }
+  function formatElapsedMilliseconds(milliseconds) {
+    const seconds = Math.max(0, Math.floor(milliseconds / 1000));
     const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60), s = seconds % 60;
     return `${pad(h)}:${pad(m)}:${pad(s)}`;
+  }
+  function timerSnapshot(current, now) {
+    const start = Number.isFinite(Number(current.startedAt)) ? Number(current.startedAt) : Number(current.start);
+    const elapsed = Math.max(0, Number(now) - start);
+    let breakMilliseconds = 0;
+    for (const item of current.breaks || []) {
+      breakMilliseconds += Math.max(0, Math.min(Number(now), item.end) - Math.max(start, item.start));
+    }
+    if (current.breakStart) {
+      const breakStart = Number.isFinite(Number(current.breakStartedAt)) ? Number(current.breakStartedAt) : Number(current.breakStart);
+      breakMilliseconds += Math.max(0, Number(now) - Math.max(start, breakStart));
+    }
+    breakMilliseconds = Math.min(elapsed, breakMilliseconds);
+    return { elapsed, breakMilliseconds, workMilliseconds: Math.max(0, elapsed - breakMilliseconds) };
   }
   function netMinutes(start, end, breaks) {
     let total = Math.max(0, Math.floor((end - start) / 60000));
@@ -252,19 +277,23 @@
     const now = roundToNearestQuarter(timestamp);
     if (action === 'clock-in') {
       if (current) return { current, records, changed: false, message: 'すでに勤務中です' };
-      return { current: { start: now, breaks: [], breakStart: null }, records, changed: true, message: '出勤時刻を記録しました' };
+      return { current: { start: now, startedAt: Number(timestamp), breaks: [], breakStart: null, breakStartedAt: null }, records, changed: true, message: '出勤時刻を記録しました' };
     }
     if (!current) return { current: null, records, changed: false, message: '' };
     if (action === 'break-start') {
       if (current.breakStart) return { current, records, changed: false, message: '' };
-      return { current: { ...current, breakStart: now }, records, changed: true, message: '休憩を開始しました' };
+      return { current: { ...current, breakStart: now, breakStartedAt: Number(timestamp) }, records, changed: true, message: '休憩を開始しました' };
     }
     if (action === 'break-end') {
       if (!current.breakStart) return { current, records, changed: false, message: '' };
       if (now <= current.breakStart) return { current, records, changed: false, error: '休憩終了時刻を確認してください' };
-      return { current: { ...current, breaks: [...(current.breaks || []), { start: current.breakStart, end: now }], breakStart: null }, records, changed: true, message: '休憩時間を記録しました' };
+      return { current: { ...current, breaks: [...(current.breaks || []), { start: current.breakStart, end: now }], breakStart: null, breakStartedAt: null }, records, changed: true, message: '休憩時間を記録しました' };
     }
     if (action === 'clock-out') {
+      const startedAt = Number.isFinite(Number(current.startedAt)) ? Number(current.startedAt) : Number(current.start);
+      if (Number(timestamp) - startedAt < 15 * 60000) {
+        return { current: null, records, changed: true, cancelled: true, message: '15分未満のため勤務を取り消しました' };
+      }
       const breaks = [...(current.breaks || [])];
       if (current.breakStart && now > current.breakStart) breaks.push({ start: current.breakStart, end: now });
       const record = calculateRecord(current.start, now, breaks, ratesSnapshot);
@@ -316,10 +345,28 @@
     if (theme) theme.content = state.theme === 'dark' ? '#111318' : '#f5f6f8';
   }
 
+  function refreshCurrentTimer(current, now) {
+    const timer = timerSnapshot(current, now);
+    $('#elapsed-time').textContent = formatElapsedMilliseconds(timer.elapsed);
+    $('#elapsed-details').textContent = `実働 ${formatElapsedMilliseconds(timer.workMilliseconds)} · 休憩 ${formatElapsedMilliseconds(timer.breakMilliseconds)}`;
+  }
+
+  function refreshClock(now = Date.now()) {
+    const date = new Date(now);
+    $('#current-time').textContent = `${date.getHours()}:${pad(date.getMinutes())}`;
+    $('#today-date').textContent = `${dateLabel(date, true)}（${'日月火水木金土'[date.getDay()]}）`;
+    if (state.current) refreshCurrentTimer(state.current, now);
+    if (displayedReportMonth && monthKey(date) !== displayedReportMonth) renderReport();
+  }
+
+  function startClock() {
+    refreshClock();
+    window.setInterval(refreshClock, 1000);
+  }
+
   function renderHome() {
-    const now = new Date();
-    $('#today-date').textContent = `${dateLabel(now, true)}（${'日月火水木金土'[now.getDay()]}）`;
-    $('#current-time').textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const now = Date.now();
+    refreshClock(now);
     const current = state.current;
     const status = $('#work-status');
     const actions = $('#punch-actions');
@@ -329,17 +376,16 @@
       status.textContent = '未出勤';
       $('#timer-label').textContent = '今日もおつかれさまです';
       $('#elapsed-time').classList.add('hidden');
+      $('#elapsed-details').classList.add('hidden');
       addPunchButton(actions, '出勤する', 'primary punch-button', 'clock-in');
     } else {
       const breaking = Boolean(current.breakStart);
       status.textContent = breaking ? '休憩中' : '勤務中';
       status.classList.add(breaking ? 'breaking' : 'working');
-      $('#timer-label').textContent = breaking ? '休憩中 · 勤務時間には含まれません' : `出勤 ${timeLabel(current.start)}`;
+      $('#timer-label').textContent = breaking ? `休憩中 · 出勤 ${timeLabel(current.start)}` : `出勤 ${timeLabel(current.start)} · 勤務経過時間`;
       $('#elapsed-time').classList.remove('hidden');
-      const liveBreaks = [...(current.breaks || [])];
-      const roundedNow = roundToNearestQuarter(Date.now());
-      if (current.breakStart) liveBreaks.push({ start: current.breakStart, end: roundedNow });
-      $('#elapsed-time').textContent = formatDurationClock(current.start, roundedNow, liveBreaks);
+      $('#elapsed-details').classList.remove('hidden');
+      refreshCurrentTimer(current, now);
       if (breaking) addPunchButton(actions, '休憩を終了', 'primary punch-button', 'break-end');
       else {
         addPunchButton(actions, '休憩を開始', 'secondary punch-secondary', 'break-start');
@@ -610,10 +656,9 @@
     } catch (error) { showToast(error.message || '入力内容を確認してください'); }
   }
 
-  async function clockAction(action) {
-    const now = Date.now();
+  async function clockAction(action, timestamp = Date.now()) {
     try {
-      const result = transitionPunch(state.current, state.records, action, now, clone(state.rates));
+      const result = transitionPunch(state.current, state.records, action, timestamp, clone(state.rates));
       if (result.error) return showToast(result.error);
       if (!result.changed) { if (result.message) showToast(result.message); return; }
       state.current = result.current;
@@ -665,6 +710,9 @@
   }
 
   function bindEvents() {
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) refreshClock();
+    });
     document.addEventListener('click', async event => {
       const nav = eventClosest(event, '[data-nav]');
       if (nav) return navigate(nav.dataset.nav);
@@ -754,20 +802,9 @@
     renderHome();
     $('#month-select').value = monthKey(Date.now());
     renderHistory(); renderReport(); renderSettings();
-    window.setInterval(() => {
-      const now = new Date();
-      $('#current-time').textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-      $('#today-date').textContent = `${dateLabel(now, true)}（${'日月火水木金土'[now.getDay()]}）`;
-      if (state.current) {
-        const liveBreaks = [...(state.current.breaks || [])];
-        const roundedNow = roundToNearestQuarter(Date.now());
-        if (state.current.breakStart) liveBreaks.push({ start: state.current.breakStart, end: roundedNow });
-        $('#elapsed-time').textContent = formatDurationClock(state.current.start, roundedNow, liveBreaks);
-      }
-      if (monthKey(now) !== displayedReportMonth) renderReport();
-    }, 1000);
+    startClock();
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-      const workerUrl = new URL('./sw.js?v=2.2.0', document.baseURI);
+      const workerUrl = new URL('./sw.js?v=2.3.0', document.baseURI);
       navigator.serviceWorker.register(workerUrl.href)
         .then(registration => registration.update())
         .catch(error => console.warn('Service Workerの登録に失敗しました。', error));
