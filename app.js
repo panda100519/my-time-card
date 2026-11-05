@@ -151,6 +151,14 @@
     else date.setMinutes(45, 0, 0);
     return date.getTime();
   }
+
+  function completedBreak(current, timestamp) {
+    const startedAt = Number.isFinite(Number(current.breakStartedAt)) ? Number(current.breakStartedAt) : Number(current.breakStart);
+    if (Number(timestamp) - startedAt < 15 * 60000) return null;
+    const start = Number(current.breakStart);
+    const roundedEnd = roundToNearestQuarter(timestamp);
+    return { start, end: roundedEnd <= start ? start + 15 * 60000 : roundedEnd };
+  }
   function localDateTime(date) {
     const d = new Date(date);
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -286,8 +294,14 @@
     }
     if (action === 'break-end') {
       if (!current.breakStart) return { current, records, changed: false, message: '' };
-      if (now <= current.breakStart) return { current, records, changed: false, error: '休憩終了時刻を確認してください' };
-      return { current: { ...current, breaks: [...(current.breaks || []), { start: current.breakStart, end: now }], breakStart: null, breakStartedAt: null }, records, changed: true, message: '休憩時間を記録しました' };
+      const completed = completedBreak(current, timestamp);
+      if (!completed) {
+        return {
+          current: { ...current, breakStart: null, breakStartedAt: null }, records,
+          changed: true, breakCancelled: true, message: '15分未満のため休憩を取り消しました'
+        };
+      }
+      return { current: { ...current, breaks: [...(current.breaks || []), completed], breakStart: null, breakStartedAt: null }, records, changed: true, message: '休憩時間を記録しました' };
     }
     if (action === 'clock-out') {
       const startedAt = Number.isFinite(Number(current.startedAt)) ? Number(current.startedAt) : Number(current.start);
@@ -295,7 +309,10 @@
         return { current: null, records, changed: true, cancelled: true, message: '15分未満のため勤務を取り消しました' };
       }
       const breaks = [...(current.breaks || [])];
-      if (current.breakStart && now > current.breakStart) breaks.push({ start: current.breakStart, end: now });
+      if (current.breakStart) {
+        const completed = completedBreak(current, timestamp);
+        if (completed) breaks.push(completed);
+      }
       const record = calculateRecord(current.start, now, breaks, ratesSnapshot);
       return { current: null, records: [...records, record], changed: true, record, message: `退勤を記録しました · ${yen(record.amount)}` };
     }
@@ -700,7 +717,7 @@
       const breakdown = aggregate([record]).map(g => `${g.name}:${formatHours(g.minutes)}:${Math.round(g.amount)}円`).join(' / ');
       rows.push([localDateTime(record.start), localDateTime(record.end), breaks, record.totalMinutes, formatHours(record.totalMinutes), record.amount, breakdown]);
     }
-    return '\ufeff' + rows.map(row => row.map(value => `"${String(value ?? '').replaceAll('"', '""')}"`).join(',')).join('\n');
+    return '\ufeff' + rows.map(row => row.map(value => `"${String(value ?? '').replaceAll('"', '""')}"`).join(',')).join('\r\n');
   }
 
   function download(filename, content, type) {
@@ -804,7 +821,7 @@
     renderHistory(); renderReport(); renderSettings();
     startClock();
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
-      const workerUrl = new URL('./sw.js?v=2.3.0', document.baseURI);
+      const workerUrl = new URL('./sw.js?v=2.4.0', document.baseURI);
       navigator.serviceWorker.register(workerUrl.href)
         .then(registration => registration.update())
         .catch(error => console.warn('Service Workerの登録に失敗しました。', error));
@@ -816,3 +833,4 @@
     document.body.insertAdjacentHTML('beforeend', '<p style="padding:24px;color:#f88">アプリを起動できませんでした。ページを再読み込みしてください。</p>');
   });
 })();
+
