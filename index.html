@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111318">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="MY TIME CARD">
+  <meta name="description" content="自分専用のタイムカード。打刻、給与計算、履歴、LINE報告をまとめて管理。">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png">
+  <link rel="stylesheet" href="./styles.css">
+  <title>MY TIME CARD</title>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="brand-copy"><div class="brand-name">MY TIME CARD</div><div class="brand-caption">PERSONAL WORK LOG</div></div>
+      <button class="icon-button" data-nav="settings" aria-label="設定を開く" title="設定">⚙</button>
+    </header>
+
+    <main id="main" class="main-content" tabindex="-1">
+      <section class="view active" id="view-home" aria-label="ホーム">
+        <div class="hero-card card">
+          <div class="hero-top"><span id="today-date" class="muted">----</span><span id="work-status" class="status-pill">未出勤</span></div>
+          <div id="current-time" class="current-time">--:--</div>
+          <div id="timer-label" class="timer-label">今日もおつかれさまです</div>
+          <div id="elapsed-time" class="elapsed-time hidden">00:00:00</div>
+          <div class="punch-actions" id="punch-actions"></div>
+          <div id="rate-warning-home" class="inline-warning hidden"></div>
+        </div>
+
+        <div class="section-heading"><div><span class="eyebrow">THIS MONTH</span><h2>今月のサマリー</h2></div><button class="text-button" data-nav="history">履歴を見る <span>›</span></button></div>
+        <div class="stats-grid">
+          <article class="stat-card card"><div class="stat-label">勤務日数</div><div class="stat-value"><span id="month-days">0</span><small>日</small></div></article>
+          <article class="stat-card card"><div class="stat-label">勤務時間</div><div class="stat-value"><span id="month-hours">0h</span></div></article>
+          <article class="stat-card card"><div class="stat-label">今月の給与</div><div class="stat-value yen"><span id="month-pay">¥0</span></div></article>
+          <article class="stat-card card"><div class="stat-label">累計勤務時間</div><div class="stat-value"><span id="all-hours">0h</span></div></article>
+        </div>
+
+        <div class="section-heading compact"><div><span class="eyebrow">PAY BREAKDOWN</span><h2>時給区分ごとの時間</h2></div></div>
+        <div id="home-breakdown" class="breakdown-card card"></div>
+        <button class="report-shortcut card" data-nav="report"><span class="shortcut-icon">↗</span><span><strong>LINE報告を作成</strong><small>勤務履歴をまとめて共有</small></span><span class="shortcut-chevron">›</span></button>
+      </section>
+
+      <section class="view" id="view-history" aria-label="勤務履歴">
+        <div class="page-heading"><span class="eyebrow">WORK HISTORY</span><h1>勤務履歴</h1><p>勤務を追加・修正すると給与を再計算します。</p></div>
+        <div class="month-picker card"><label for="month-select">表示する月</label><input id="month-select" type="month"></div>
+        <div id="month-summary" class="month-summary card"></div>
+        <div class="history-toolbar"><h2>勤務記録</h2><button class="primary small" id="add-entry">＋ 手動で追加</button></div>
+        <div id="history-list" class="history-list"></div>
+        <div class="export-row"><button class="secondary" id="export-csv">CSVを書き出す</button></div>
+      </section>
+
+      <section class="view" id="view-report" aria-label="LINE報告">
+        <div class="page-heading"><span class="eyebrow">LINE REPORT</span><h1>報告文</h1><p>全期間の勤務履歴から自動で作成します。</p></div>
+        <div id="report-total" class="report-total card"></div>
+        <textarea id="report-text" class="report-text card" readonly aria-label="LINE送信用の勤務報告"></textarea>
+        <div class="report-actions"><button id="copy-report" class="primary">文章をコピー</button><button id="share-report" class="secondary">共有…</button></div>
+        <p id="share-hint" class="helper-text">共有メニューからLINEを選べます。</p>
+      </section>
+
+      <section class="view" id="view-settings" aria-label="設定">
+        <div class="page-heading"><span class="eyebrow">PREFERENCES</span><h1>設定</h1><p>アプリの見た目と時給区分を管理します。</p></div>
+        <section class="settings-section card">
+          <div class="setting-title"><div><h2>テーマ</h2><p>選んだテーマはこの端末に保存されます。</p></div></div>
+          <div class="theme-switch" role="group" aria-label="テーマ選択"><button data-theme="dark">● ダーク</button><button data-theme="light">○ ライト</button></div>
+        </section>
+        <section class="settings-section card">
+          <div class="setting-title"><div><h2>LINE表示名</h2><p>報告文の先頭に表示します。</p></div></div>
+          <label class="field-label" for="display-name">名前</label><input id="display-name" class="text-input" maxlength="40" autocomplete="name" placeholder="ゆうた">
+        </section>
+        <section class="settings-section card">
+          <div class="setting-title"><div><h2>時間帯別の時給</h2><p>時刻は開始を含み、終了を含みません。日をまたぐ設定もできます。</p></div></div>
+          <div id="rate-warning" class="schedule-warning hidden"></div>
+          <div id="rates-list" class="rates-list"></div>
+          <button id="add-rate" class="secondary full-width">＋ 時給区分を追加</button>
+          <button id="save-rates" class="primary full-width save-rates">時給設定を保存</button>
+        </section>
+        <section class="settings-section card">
+          <div class="setting-title"><div><h2>データ管理</h2><p>履歴をJSONで保存し、別の端末へ移せます。</p></div></div>
+          <div class="data-actions"><button id="backup-data" class="secondary">バックアップを保存</button><button id="restore-data" class="secondary">バックアップを復元</button><input id="restore-file" type="file" accept="application/json,.json" hidden></div>
+          <p class="helper-text">CSV出力は「勤務履歴」画面から利用できます。</p>
+        </section>
+        <div class="app-version">MY TIME CARD · オフライン対応</div>
+      </section>
+    </main>
+
+    <nav class="tabbar" aria-label="メインメニュー">
+      <button class="tab active" data-nav="home"><span class="tab-icon">◉</span><span>ホーム</span></button>
+      <button class="tab" data-nav="history"><span class="tab-icon">▤</span><span>履歴</span></button>
+      <button class="tab" data-nav="report"><span class="tab-icon">↗</span><span>LINE報告</span></button>
+      <button class="tab" data-nav="settings"><span class="tab-icon">⚙</span><span>設定</span></button>
+    </nav>
+  </div>
+
+  <dialog id="entry-dialog" class="entry-dialog">
+    <form id="entry-form" method="dialog">
+      <div class="dialog-head"><div><span class="eyebrow">WORK RECORD</span><h2 id="dialog-title">勤務を追加</h2></div><button class="icon-button close-dialog" type="button" aria-label="閉じる">×</button></div>
+      <input type="hidden" id="entry-id">
+      <label class="field-label" for="entry-start">出勤</label><input class="text-input" id="entry-start" type="datetime-local" required>
+      <label class="field-label" for="entry-end">退勤</label><input class="text-input" id="entry-end" type="datetime-local" required>
+      <label class="field-label" for="entry-breaks">休憩（1行に「開始 / 終了」）</label><textarea class="text-input breaks-input" id="entry-breaks" placeholder="2026-11-05T19:00 / 2026-11-05T19:30"></textarea>
+      <p class="helper-text">休憩がなければ空欄にしてください。過去の記録は保存済みの時給で再計算します。</p>
+      <div class="dialog-actions"><button class="secondary close-dialog" type="button">キャンセル</button><button class="primary" type="submit">保存する</button></div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js" defer></script>
+</body>
+</html>
