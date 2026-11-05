@@ -4,3 +4,12 @@
 @media(min-width:560px){.main-content{padding-left:22px;padding-right:22px}.app-shell{border-left:1px solid var(--line);border-right:1px solid var(--line);min-height:100vh}.tabbar{border-left:1px solid var(--line);border-right:1px solid var(--line)}}
 @media(max-width:370px){.main-content{padding-left:14px;padding-right:14px}.current-time{font-size:52px}.stat-value{font-size:22px}.settings-section{padding:14px}.rate-head .rate-price{width:76px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
+
+/* Keep schedule time controls inside their cards on narrow Safari viewports. */
+.rates-list,.rate-item,.rate-times,.rate-times label{min-width:0}
+.rate-item{width:100%}
+.rate-times{width:100%;grid-template-columns:repeat(2,minmax(0,1fr))}
+.rate-times label{display:block}
+.rate-times input{display:block;box-sizing:border-box;width:100%;min-width:0;max-width:100%;height:36px;padding:0 4px;font-size:12px}
+@media(max-width:370px){.rate-times{gap:6px}.rate-times input{padding:0 3px;font-size:11px}}
+
