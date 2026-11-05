@@ -302,6 +302,81 @@ test('clock-in, break start/end and clock-out all save rounded times and calcula
     'ゆうた\n11/5  17:00～18:15 1.25h\n      18:30～20:15 1.75h\n前3h 後0h');
 });
 
+test('break start and end use the same quarter-hour rounding as attendance', () => {
+  const { api } = makeApp();
+  const rates = api.getState().rates;
+  const cases = [
+    ['12:52', '13:00'], ['12:55', '13:00'], ['13:02', '13:00'],
+    ['13:08', '13:15'], ['13:23', '13:15'], ['13:24', '13:30']
+  ];
+  for (const [pressed, expected] of cases) {
+    const shift = api.transitionPunch(null, [], 'clock-in', stamp('09:00'), rates);
+    const onBreak = api.transitionPunch(shift.current, [], 'break-start', stamp(pressed), rates);
+    assert.equal(onBreak.current.breakStart, stamp(expected), `break start ${pressed} should round to ${expected}`);
+  }
+  const shift = api.transitionPunch(null, [], 'clock-in', stamp('09:00'), rates);
+  const onBreak = api.transitionPunch(shift.current, [], 'break-start', stamp('12:52'), rates);
+  const resumed = api.transitionPunch(onBreak.current, [], 'break-end', stamp('13:08'), rates);
+  assert.deepEqual(JSON.parse(JSON.stringify(resumed.current.breaks)), [{ start: stamp('13:00'), end: stamp('13:15') }]);
+});
+
+test('5- and 14-minute breaks cancel in the real button flow without changing the shift or history', async () => {
+  for (const minutes of [5, 14]) {
+    const { api, document, values } = makeApp({ withDOM: true });
+    const rates = api.getState().rates;
+    const existing = api.calculateRecord(stamp('08:00'), stamp('08:30'), [], rates);
+    const shift = api.transitionPunch(null, [], 'clock-in', stamp('09:00'), rates);
+    const previousBreak = { start: stamp('10:00'), end: stamp('10:15') };
+    const onBreak = api.transitionPunch({ ...shift.current, breaks: [previousBreak] }, [], 'break-start', stamp('11:00'), rates);
+    api.setState({ ...api.getState(), current: onBreak.current, records: [existing] });
+    api.setNow(stamp('11:00') + minutes * 60000);
+    api.bindEvents(); api.renderHome();
+    await document.click(document.querySelector('#punch-actions').children[0]);
+
+    const state = api.getState();
+    assert.equal(state.current.start, shift.current.start);
+    assert.equal(state.current.startedAt, shift.current.startedAt);
+    assert.equal(state.current.breakStart, null);
+    assert.equal(state.current.breakStartedAt, null);
+    assert.deepEqual(JSON.parse(JSON.stringify(state.current.breaks)), [previousBreak]);
+    assert.equal(state.records.length, 1);
+    assert.equal(state.records[0].id, existing.id);
+    assert.equal(document.querySelector('#work-status').textContent, '勤務中');
+    assert.equal(document.querySelector('#punch-actions').children[0].dataset.action, 'break-start');
+    const saved = JSON.parse(values.get('my-time-card'));
+    assert.equal(saved.current.breakStart, null);
+    assert.equal(saved.records.length, 1);
+  }
+});
+
+test('15-minute breaks are recorded and deducted, while a shorter active break is ignored at clock-out', () => {
+  const { api } = makeApp();
+  const rates = api.getState().rates;
+  const shift = api.transitionPunch(null, [], 'clock-in', stamp('11:00'), rates);
+  const onBreak = api.transitionPunch(shift.current, [], 'break-start', stamp('12:00'), rates);
+  const resumed = api.transitionPunch(onBreak.current, [], 'break-end', stamp('12:15'), rates);
+  assert.deepEqual(JSON.parse(JSON.stringify(resumed.current.breaks)), [{ start: stamp('12:00'), end: stamp('12:15') }]);
+  const clockOut = api.transitionPunch(resumed.current, [], 'clock-out', stamp('13:00'), rates);
+  assert.equal(clockOut.records[0].totalMinutes, 105);
+
+  const activeBreak = api.transitionPunch(shift.current, [], 'break-start', stamp('12:00'), rates);
+  const shortBreakClockOut = api.transitionPunch(activeBreak.current, [], 'clock-out', stamp('12:05'), rates);
+  assert.equal(shortBreakClockOut.records[0].totalMinutes, 60);
+});
+
+test('15-minute break crossing midnight is recorded on its rounded dates', () => {
+  const { api } = makeApp();
+  const rates = api.getState().rates;
+  const shift = api.transitionPunch(null, [], 'clock-in', datedStamp('2026-11-05', '22:00'), rates);
+  const onBreak = api.transitionPunch(shift.current, [], 'break-start', datedStamp('2026-11-05', '23:52'), rates);
+  const resumed = api.transitionPunch(onBreak.current, [], 'break-end', datedStamp('2026-11-06', '00:08'), rates);
+  assert.deepEqual(JSON.parse(JSON.stringify(resumed.current.breaks)), [{
+    start: datedStamp('2026-11-06', '00:00'), end: datedStamp('2026-11-06', '00:15')
+  }]);
+  assert.equal(resumed.current.start, datedStamp('2026-11-05', '22:00'));
+  assert.equal(resumed.current.breakStart, null);
+});
+
 test('clock-outs after 5 or 14 minutes cancel without a new history row and reset the home state', async () => {
   for (const minutes of [5, 14]) {
     const { api, document, values } = makeApp({ withDOM: true });
@@ -437,6 +512,8 @@ test('rounded punch records remain correct across midnight', () => {
 
 test('bound punch buttons process clock-in, break and clock-out clicks', async () => {
   const { api, document, values } = makeApp({ withDOM: true });
+  const startAt = stamp('17:00');
+  api.setNow(startAt);
   api.bindEvents();
   api.renderHome();
   const actions = document.querySelector('#punch-actions');
@@ -445,19 +522,12 @@ test('bound punch buttons process clock-in, break and clock-out clicks', async (
 
   await document.click(actions.children[0]);
   assert.equal(document.querySelector('#work-status').textContent, '休憩中');
-  let current = api.getState().current;
-  api.setState({ ...api.getState(), current: {
-    ...current,
-    start: current.start - 20 * 60000,
-    startedAt: current.startedAt - 20 * 60000,
-    breakStart: current.start - 10 * 60000,
-    breakStartedAt: current.startedAt - 10 * 60000
-  } });
-  api.renderHome();
+  api.setNow(startAt + 20 * 60000);
 
   await document.click(actions.children[0]);
   assert.equal(document.querySelector('#work-status').textContent, '勤務中');
   assert.equal(api.getState().current.breaks.length, 1);
+  api.setNow(startAt + 60 * 60000);
   await document.click(actions.children[1]);
 
   assert.equal(api.getState().current, null);
@@ -604,3 +674,4 @@ test('CSV export escapes quotes and includes the confirmed total', () => {
   assert.ok(csv.startsWith('\ufeff"出勤日時"'));
   assert.match(csv, /"夕方, A ""test"":1h:1200円"/);
 });
+
